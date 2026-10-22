@@ -1,0 +1,20 @@
+# Project Context: Uncertainty-Aware Sequential Detection of Imminent Temperature Excursions
+
+## Technical Stack & Standards
+- Language: Python 3.11+
+- Libraries: numpy, scipy, pandas, matplotlib, pytest, torch (for baselines)
+- Code Style: Strict type hints, comprehensive docstrings (Google style), modular architecture.
+- Testing: Every module must have corresponding `pytest` tests in `tests/`. Fixed random seeds for reproducibility.
+- Configuration: Use dataclasses or YAML configuration files.
+
+## Mathematical Conventions
+- State transition: $x(t+1) = F x(t) + w(t)$, $w \sim \mathcal{N}(0, Q)$ (local-linear-trend or OU).
+- Observations: $y(t) = x(t) + e(t)$ when $m(t)=1$, where $m(t)=1$ denotes "observed".
+- Missingness: $P(m(t)=1 \mid x(t)) = \text{logistic}(g_0 + g_1(x(t) - \mu))$.
+- Risk: $r(t) = P\left(\max_{k=1\dots H} x(t+k) > \tau \;\Big\vert{}\; y(1\dots t), m(1\dots t)\right)$ with credible interval $[r_{\text{lo}}, r_{\text{hi}}]$.
+- Decision Rules: Three-way decision framework (ALARM / VERIFY / WAIT) with gap-stratified conformal calibration and e-process false-alarm control.
+
+## Execution Rules
+- Always write or update tests alongside code implementation.
+- Do not invent library functions; implement clean fallback logic if necessary.
+- State underlying assumptions clearly in docstrings and comments.
