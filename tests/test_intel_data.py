@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -155,16 +156,17 @@ def test_define_intel_excursions_uses_cleaned_quantile(tmp_path: Path) -> None:
     series = define_intel_excursions(df, mote_id=7, tau_quantile=0.5, H=15)
     y, m, event_times = series[0], series[1], series[2]
     assert series.H == 15
-    # Cleaned values: 10, 10.5, 11, 20, NaN (spike), 10.2, 21.
-    # tau is median of finite cleaned = 11.0.
-    assert series.tau == pytest.approx(11.0)
+    # Cleaned finite values: 10, 10.5, 11, 20, 10.2, 21.
+    # Linear-interpolation median of the even sample is 10.75.
+    finite = np.array([10.0, 10.5, 11.0, 20.0, 10.2, 21.0])
+    assert series.tau == pytest.approx(float(np.quantile(finite, 0.5, method="linear")))
     np.testing.assert_array_equal(m == 1, np.isfinite(y))
     # Spike is retained in y_raw but masked in y.
     assert np.isnan(y[4])
     assert series.y_raw[4] == pytest.approx(150.0)
     assert bool(series.is_outlier[4])
-    # Crossings of 11.0: index 3 (11 -> 20) and index 6 (10.2 -> 21).
-    np.testing.assert_array_equal(event_times, np.array([3, 6]))
+    # Upcrossings of 10.75: index 2 (10.5 -> 11) and index 6 (10.2 -> 21).
+    np.testing.assert_array_equal(event_times, np.array([2, 6]))
 
 
 def test_chronological_splits_have_no_overlap_or_leakage(tmp_path: Path) -> None:
@@ -211,10 +213,53 @@ def test_split_ratios_must_sum_to_one(tmp_path: Path) -> None:
         split_data_chronological(df, train_ratio=0.5, val_ratio=0.5, calib_ratio=0.2, test_ratio=0.2)
 
 
+def test_full_train_ratio_does_not_drop_rows(tmp_path: Path) -> None:
+    lines = [
+        f"2004-02-28 01:00:{second:02d}.0 {epoch} 1 19.0 30.0 1.0 2.7"
+        for epoch, second in enumerate(range(0, 10), start=1)
+    ]
+    df = load_intel_data(_write_dump(tmp_path, text="\n".join(lines) + "\n"), regularize=True)
+    splits = split_data_chronological(
+        df, train_ratio=1.0, val_ratio=0.0, calib_ratio=0.0, test_ratio=0.0
+    )
+    assert len(splits.train) == len(df)
+    assert splits.val.empty and splits.calib.empty and splits.test.empty
+
+
 def test_load_mote_locations_skips_header(tmp_path: Path) -> None:
     locs = load_mote_locations(_write_locs(tmp_path))
     assert list(locs["moteid"]) == [1, 2]
     assert locs.loc[locs["moteid"] == 2, "loc_y"].iloc[0] == pytest.approx(20.0)
+
+
+def test_truncated_line_keeps_identifiable_packet(tmp_path: Path) -> None:
+    dump = (
+        "2004-02-28 01:00:00.0 1 3 18.0 30.0 1.0 2.7\n"
+        "2004-02-28 01:00:31.0 2 3 18.5\n"  # truncated after temperature
+        "short\n"
+    )
+    df = load_intel_data(_write_dump(tmp_path, text=dump), regularize=False)
+    mote = df.loc[df["moteid"] == 3].sort_values("epoch")
+    assert len(mote) == 2
+    assert pd.isna(mote.loc[mote["epoch"] == 2, "voltage"].iloc[0])
+    assert mote.loc[mote["epoch"] == 2, "temperature"].iloc[0] == pytest.approx(18.5)
+    assert df.attrs["n_malformed_lines"] >= 1
+
+
+def test_real_dump_sample_parses_and_flags_mnar(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "data.txt"
+    if not source.is_file():
+        pytest.skip("Intel Lab dump data.txt is not in the workspace")
+    with source.open("r", encoding="utf-8", errors="replace") as handle:
+        sample = "".join(islice(handle, 80))
+    df = load_intel_data(_write_dump(tmp_path, text=sample), regularize=True)
+    assert {"timestamp", "epoch", "moteid", "temperature", "m", "is_outlier"}.issubset(df.columns)
+    assert df["timestamp"].dt.tz is not None
+    # First public-dump row is a >100 C / low-voltage packet; it must remain.
+    spikes = df.loc[df["is_temp_spike"] | df["is_voltage_low"]]
+    if len(spikes):
+        assert (spikes["m"] == 0).all()
+        assert spikes["temperature"].notna().any() or spikes["voltage"].notna().any()
 
 
 def test_custom_thresholds_via_config(tmp_path: Path) -> None:

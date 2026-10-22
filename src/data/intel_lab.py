@@ -440,7 +440,7 @@ def define_intel_excursions(
     finite = np.isfinite(cleaned)
     if not np.any(finite):
         raise ValueError(f"mote {mote_id} has no valid temperatures to set tau.")
-    tau = float(np.nanquantile(cleaned, tau_quantile))
+    tau = float(np.nanquantile(cleaned, tau_quantile, method="linear"))
     event_times = _excursion_starts(cleaned, tau)
     timestamps = mote["timestamp"].to_numpy() if "timestamp" in mote.columns else np.array([])
     return IntelExcursionSeries(
@@ -491,50 +491,49 @@ def split_data_chronological(
         raise ValueError(f"Column '{time_col}' is required for chronological splits.")
 
     ordered = df.loc[df[time_col].notna()].sort_values(time_col, kind="mergesort")
-    unique_times = np.sort(ordered[time_col].unique())
+    unique_times = np.sort(pd.unique(ordered[time_col]))
     n = int(unique_times.size)
+    empty = df.iloc[0:0].copy()
     if n == 0:
-        empty = df.iloc[0:0].copy()
         return ChronologicalSplits(empty, empty, empty, empty, {"unique_timestamps": 0})
 
-    c_train = int(np.floor(n * train_ratio))
-    c_val = int(np.floor(n * (train_ratio + val_ratio)))
-    c_calib = int(np.floor(n * (train_ratio + val_ratio + calib_ratio)))
-    # Keep the last unique timestamp in test when rounding would empty it.
-    c_train = min(max(c_train, 0), n)
-    c_val = min(max(c_val, c_train), n)
-    c_calib = min(max(c_calib, c_val), n)
-
-    t_train_end = unique_times[c_train] if c_train < n else None
-    t_val_end = unique_times[c_val] if c_val < n else None
-    t_calib_end = unique_times[c_calib] if c_calib < n else None
+    edges = [
+        0,
+        int(np.floor(n * train_ratio)),
+        int(np.floor(n * (train_ratio + val_ratio))),
+        int(np.floor(n * (train_ratio + val_ratio + calib_ratio))),
+        n,
+    ]
+    for i in range(1, len(edges)):
+        edges[i] = int(min(max(edges[i], edges[i - 1]), n))
+    edges[-1] = n
 
     ts = ordered[time_col]
-    if c_train == 0:
-        train = ordered.iloc[0:0]
-        rest = ordered
-    else:
-        train = ordered.loc[ts < t_train_end]
-        rest = ordered.loc[ts >= t_train_end]
 
-    if c_val == c_train:
-        val = ordered.iloc[0:0]
-    else:
-        val = rest.loc[rest[time_col] < t_val_end]
-        rest = rest.loc[rest[time_col] >= t_val_end]
+    def _slice(i: int, j: int) -> pd.DataFrame:
+        if i >= j:
+            return ordered.iloc[0:0]
+        t_start = unique_times[i]
+        if j >= n:
+            return ordered.loc[ts >= t_start]
+        t_end = unique_times[j]
+        return ordered.loc[(ts >= t_start) & (ts < t_end)]
 
-    if c_calib == c_val:
-        calib = ordered.iloc[0:0]
-    else:
-        calib = rest.loc[rest[time_col] < t_calib_end]
-        rest = rest.loc[rest[time_col] >= t_calib_end]
+    train = _slice(edges[0], edges[1])
+    val = _slice(edges[1], edges[2])
+    calib = _slice(edges[2], edges[3])
+    test = _slice(edges[3], edges[4])
 
-    test = rest
+    def _edge_time(index: int):
+        if 0 <= index < n:
+            return unique_times[index]
+        return None
+
     cutpoints: dict[str, Any] = {
         "unique_timestamps": n,
-        "train_end": t_train_end,
-        "val_end": t_val_end,
-        "calib_end": t_calib_end,
+        "train_end": _edge_time(edges[1]) if edges[1] < n else None,
+        "val_end": _edge_time(edges[2]) if edges[2] < n else None,
+        "calib_end": _edge_time(edges[3]) if edges[3] < n else None,
         "t_min": unique_times[0],
         "t_max": unique_times[-1],
         "ratios": {
@@ -543,6 +542,7 @@ def split_data_chronological(
             "calib": calib_ratio,
             "test": test_ratio,
         },
+        "index_edges": edges,
     }
     return ChronologicalSplits(
         train=train.reset_index(drop=True),
